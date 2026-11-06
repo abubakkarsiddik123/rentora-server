@@ -24,6 +24,10 @@ async function connectToMongoDB() {
     const bookingCollection = db.collection("bookings");
     const transactionCollection = db.collection("transactions");
     const favoriteCollection = db.collection("favorites");
+    // Better Auth-এর ইউজার কালেকশন। ডাটাবেস আলাদা হলে .env-এ AUTH_DB_NAME দিন
+    const userCollection = client
+      .db(process.env.AUTH_DB_NAME || "rentoraDB")
+      .collection("user");
 
     // property related apis
     app.get("/api/properties", async (req, res) => {
@@ -330,6 +334,79 @@ async function connectToMongoDB() {
       res.status(201).send(result);
     });
 
+    // Owner: বুকিং approve / reject
+    // (JWT ধাপে ownerId টোকেন থেকে নেওয়া হবে, আর verifyRole("owner") বসবে)
+    app.patch("/api/bookings/:id/status", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid booking id." });
+      }
+      const { ownerId, status } = req.body;
+
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).send({
+          error: true,
+          message: "Status must be approved or rejected.",
+        });
+      }
+
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(req.params.id),
+        ownerId,
+      });
+      if (!booking) {
+        return res.status(404).send({
+          error: true,
+          message: "Booking not found or you are not the owner.",
+        });
+      }
+      if (booking.status !== "pending") {
+        return res.status(400).send({
+          error: true,
+          message: `This booking is already ${booking.status}.`,
+        });
+      }
+
+      if (status === "approved") {
+        if (booking.paymentStatus !== "paid") {
+          return res.status(400).send({
+            error: true,
+            message:
+              "Tenant has not paid yet. You cannot approve this booking.",
+          });
+        }
+
+        // প্রপার্টি এখনও approved থাকলেই booked করা যাবে
+        const propertyResult = await propertyCollection.updateOne(
+          { _id: new ObjectId(booking.propertyId), status: "approved" },
+          { $set: { status: "booked", updatedAt: new Date() } },
+        );
+        if (propertyResult.matchedCount === 0) {
+          return res.status(409).send({
+            error: true,
+            message: "This property is no longer available.",
+          });
+        }
+
+        // একই প্রপার্টির বাকি pending বুকিং স্বয়ংক্রিয়ভাবে rejected
+        await bookingCollection.updateMany(
+          {
+            propertyId: booking.propertyId,
+            _id: { $ne: booking._id },
+            status: "pending",
+          },
+          { $set: { status: "rejected", respondedAt: new Date() } },
+        );
+      }
+
+      const result = await bookingCollection.updateOne(
+        { _id: booking._id },
+        { $set: { status, respondedAt: new Date() } },
+      );
+      res.send(result);
+    });
+
     // payment related apis
 
     app.post("/api/payments/confirm", async (req, res) => {
@@ -465,6 +542,56 @@ async function connectToMongoDB() {
         return res
           .status(404)
           .send({ error: true, message: "Favorite not found." });
+      }
+      res.send(result);
+    });
+
+    // user related apis (Admin)
+    // (JWT ধাপে এই দুটো রুটে verifyRole("admin") বসবে)
+    app.get("/api/users", async (req, res) => {
+      const { role, search } = req.query;
+
+      const query = {};
+      if (role) query.role = role;
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: "i" } },
+          { email: { $regex: search, $options: "i" } },
+        ];
+      }
+
+      const result = await userCollection
+        .find(query, {
+          projection: { name: 1, email: 1, image: 1, role: 1, createdAt: 1 },
+        })
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(result);
+    });
+
+    app.patch("/api/users/:id/role", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid user id." });
+      }
+      const { role } = req.body;
+
+      if (!["tenant", "owner", "admin"].includes(role)) {
+        return res.status(400).send({
+          error: true,
+          message: "Role must be tenant, owner or admin.",
+        });
+      }
+
+      const result = await userCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        { $set: { role, updatedAt: new Date() } },
+      );
+      if (result.matchedCount === 0) {
+        return res
+          .status(404)
+          .send({ error: true, message: "User not found." });
       }
       res.send(result);
     });
