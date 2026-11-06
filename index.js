@@ -45,7 +45,11 @@ async function connectToMongoDB() {
 
       const query = {};
       if (ownerId) query.ownerId = ownerId;
-      if (status) query.status = status;
+      if (status) {
+        query.status = status;
+      } else if (!ownerId) {
+        query.status = "approved"; // পাবলিক তালিকায় শুধু approved
+      }
       if (type) query.type = type;
       if (location) query.location = { $regex: location, $options: "i" };
       if (bedrooms) query.bedrooms = { $gte: Number(bedrooms) };
@@ -87,7 +91,7 @@ async function connectToMongoDB() {
     // অবশ্যই "/:id"-এর আগে থাকতে হবে
     app.get("/api/properties/featured", async (req, res) => {
       const result = await propertyCollection
-        .find({ status: "available" })
+        .find({ status: "approved" })
         .sort({ createdAt: -1 })
         .limit(6)
         .toArray();
@@ -114,7 +118,8 @@ async function connectToMongoDB() {
     app.post("/api/properties", async (req, res) => {
       const newProperty = {
         ...req.body,
-        status: "available",
+        status: "pending",
+        rejectionReason: "",
         featured: false,
         createdAt: new Date(),
       };
@@ -136,6 +141,8 @@ async function connectToMongoDB() {
       delete fields.ownerName;
       delete fields.createdAt;
       delete fields.featured;
+      delete fields.status; // Owner নিজে approved করতে পারবে না
+      delete fields.rejectionReason;
 
       const query = { _id: new ObjectId(req.params.id), ownerId };
       const result = await propertyCollection.updateOne(query, {
@@ -147,6 +154,47 @@ async function connectToMongoDB() {
           error: true,
           message: "Property not found or you are not the owner.",
         });
+      }
+      res.send(result);
+    });
+
+    // Admin: approve / reject
+    // (JWT ধাপে এখানে verifyRole("admin") বসবে)
+    app.patch("/api/properties/:id/status", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid property id." });
+      }
+      const { status, rejectionReason } = req.body;
+
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).send({
+          error: true,
+          message: "Status must be approved or rejected.",
+        });
+      }
+      if (status === "rejected" && !rejectionReason?.trim()) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Rejection reason is required." });
+      }
+
+      const result = await propertyCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        {
+          $set: {
+            status,
+            rejectionReason:
+              status === "rejected" ? rejectionReason.trim() : "",
+            updatedAt: new Date(),
+          },
+        },
+      );
+      if (result.matchedCount === 0) {
+        return res
+          .status(404)
+          .send({ error: true, message: "Property not found." });
       }
       res.send(result);
     });
@@ -232,7 +280,7 @@ async function connectToMongoDB() {
           .status(404)
           .send({ error: true, message: "Property not found." });
       }
-      if (property.status !== "available") {
+      if (property.status !== "approved") {
         return res
           .status(400)
           .send({ error: true, message: "This property is not available." });
@@ -288,12 +336,10 @@ async function connectToMongoDB() {
       const { bookingId, sessionId, amount } = req.body;
 
       if (!ObjectId.isValid(bookingId) || !sessionId) {
-        return res
-          .status(400)
-          .send({
-            error: true,
-            message: "bookingId and sessionId are required.",
-          });
+        return res.status(400).send({
+          error: true,
+          message: "bookingId and sessionId are required.",
+        });
       }
 
       // একই sessionId দুইবার সেভ হবে না (রিলোড করলেও)
@@ -363,12 +409,10 @@ async function connectToMongoDB() {
       const { propertyId, userId } = req.body;
 
       if (!ObjectId.isValid(propertyId) || !userId) {
-        return res
-          .status(400)
-          .send({
-            error: true,
-            message: "propertyId and userId are required.",
-          });
+        return res.status(400).send({
+          error: true,
+          message: "propertyId and userId are required.",
+        });
       }
 
       const property = await propertyCollection.findOne({
