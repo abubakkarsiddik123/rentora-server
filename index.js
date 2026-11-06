@@ -91,20 +91,12 @@ async function connectToMongoDB() {
       res.send(result);
     });
 
-    app.get("/api/properties", async (req, res) => {
-      const query = {};
-      if (req.query.ownerId) query.ownerId = req.query.ownerId;
-      if (req.query.type) query.type = req.query.type;
-      if (req.query.status) query.status = req.query.status;
-
-      const result = await propertyCollection
-        .find(query)
-        .sort({ createdAt: -1 })
-        .toArray();
-      res.send(result);
-    });
-
     app.get("/api/properties/:id", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid property id." });
+      }
       const query = { _id: new ObjectId(req.params.id) };
       const result = await propertyCollection.findOne(query);
 
@@ -129,6 +121,11 @@ async function connectToMongoDB() {
 
     // শুধু মালিক আপডেট করতে পারবে
     app.patch("/api/properties/:id", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid property id." });
+      }
       const { ownerId, ...fields } = req.body;
 
       delete fields._id;
@@ -153,6 +150,11 @@ async function connectToMongoDB() {
 
     // শুধু মালিক ডিলিট করতে পারবে
     app.delete("/api/properties/:id", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid property id." });
+      }
       const query = {
         _id: new ObjectId(req.params.id),
         ownerId: req.query.ownerId,
