@@ -23,7 +23,7 @@ async function connectToMongoDB() {
     const propertyCollection = db.collection("properties");
     const bookingCollection = db.collection("bookings");
     const transactionCollection = db.collection("transactions");
-
+    const favoriteCollection = db.collection("favorites");
 
     // property related apis
     app.get("/api/properties", async (req, res) => {
@@ -272,7 +272,7 @@ async function connectToMongoDB() {
         moveInDate,
         phone,
         notes: notes || "",
-         amount: Math.round(Number(property.price) * 0.1), // সার্ভার নিজে দাম বসায়, ক্লায়েন্টের ওপর ভরসা নেই
+        amount: Math.round(Number(property.price) * 0.1), // সার্ভার নিজে দাম বসায়, ক্লায়েন্টের ওপর ভরসা নেই
         status: "pending",
         paymentStatus: "unpaid",
         createdAt: new Date(),
@@ -284,61 +284,146 @@ async function connectToMongoDB() {
 
     // payment related apis
 
-app.post("/api/payments/confirm", async (req, res) => {
-  const { bookingId, sessionId, amount } = req.body;
+    app.post("/api/payments/confirm", async (req, res) => {
+      const { bookingId, sessionId, amount } = req.body;
 
-  if (!ObjectId.isValid(bookingId) || !sessionId) {
-    return res
-      .status(400)
-      .send({ error: true, message: "bookingId and sessionId are required." });
-  }
+      if (!ObjectId.isValid(bookingId) || !sessionId) {
+        return res
+          .status(400)
+          .send({
+            error: true,
+            message: "bookingId and sessionId are required.",
+          });
+      }
 
-  // একই sessionId দুইবার সেভ হবে না (রিলোড করলেও)
-  const already = await transactionCollection.findOne({ sessionId });
-  if (already) {
-    return res.send({ alreadyConfirmed: true });
-  }
+      // একই sessionId দুইবার সেভ হবে না (রিলোড করলেও)
+      const already = await transactionCollection.findOne({ sessionId });
+      if (already) {
+        return res.send({ alreadyConfirmed: true });
+      }
 
-  const booking = await bookingCollection.findOne({
-    _id: new ObjectId(bookingId),
-  });
-  if (!booking) {
-    return res.status(404).send({ error: true, message: "Booking not found." });
-  }
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(bookingId),
+      });
+      if (!booking) {
+        return res
+          .status(404)
+          .send({ error: true, message: "Booking not found." });
+      }
 
-  await bookingCollection.updateOne(
-    { _id: booking._id },
-    { $set: { paymentStatus: "paid", paidAt: new Date() } },
-  );
+      await bookingCollection.updateOne(
+        { _id: booking._id },
+        { $set: { paymentStatus: "paid", paidAt: new Date() } },
+      );
 
-  const transaction = {
-    transactionId: sessionId,
-    sessionId,
-    bookingId,
-    propertyId: booking.propertyId,
-    propertyTitle: booking.propertyTitle,
-    tenantId: booking.tenantId,
-    tenantName: booking.tenantName,
-    ownerId: booking.ownerId,
-    ownerName: booking.ownerName,
-    amount: Number(amount) || booking.amount,
-    createdAt: new Date(),
-  };
-  const result = await transactionCollection.insertOne(transaction);
-  res.status(201).send(result);
-});
+      const transaction = {
+        transactionId: sessionId,
+        sessionId,
+        bookingId,
+        propertyId: booking.propertyId,
+        propertyTitle: booking.propertyTitle,
+        tenantId: booking.tenantId,
+        tenantName: booking.tenantName,
+        ownerId: booking.ownerId,
+        ownerName: booking.ownerName,
+        amount: Number(amount) || booking.amount,
+        createdAt: new Date(),
+      };
+      const result = await transactionCollection.insertOne(transaction);
+      res.status(201).send(result);
+    });
 
-app.get("/api/transactions", async (req, res) => {
-  const query = {};
-  if (req.query.ownerId) query.ownerId = req.query.ownerId;
-  if (req.query.tenantId) query.tenantId = req.query.tenantId;
+    app.get("/api/transactions", async (req, res) => {
+      const query = {};
+      if (req.query.ownerId) query.ownerId = req.query.ownerId;
+      if (req.query.tenantId) query.tenantId = req.query.tenantId;
 
-  const result = await transactionCollection
-    .find(query)
-    .sort({ createdAt: -1 })
-    .toArray();
-  res.send(result);
-});
+      const result = await transactionCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(result);
+    });
+
+    // favorite related apis
+
+    app.get("/api/favorites", async (req, res) => {
+      const query = {};
+      if (req.query.userId) query.userId = req.query.userId;
+      if (req.query.propertyId) query.propertyId = req.query.propertyId;
+
+      const result = await favoriteCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(result);
+    });
+
+    app.post("/api/favorites", async (req, res) => {
+      const { propertyId, userId } = req.body;
+
+      if (!ObjectId.isValid(propertyId) || !userId) {
+        return res
+          .status(400)
+          .send({
+            error: true,
+            message: "propertyId and userId are required.",
+          });
+      }
+
+      const property = await propertyCollection.findOne({
+        _id: new ObjectId(propertyId),
+      });
+      if (!property) {
+        return res
+          .status(404)
+          .send({ error: true, message: "Property not found." });
+      }
+
+      const alreadyAdded = await favoriteCollection.findOne({
+        propertyId,
+        userId,
+      });
+      if (alreadyAdded) {
+        return res
+          .status(409)
+          .send({ error: true, message: "Already in your favorites." });
+      }
+
+      const newFavorite = {
+        propertyId,
+        userId,
+        title: property.title,
+        location: property.location,
+        type: property.type,
+        price: property.price,
+        image: property.images?.[0] || "",
+        createdAt: new Date(),
+      };
+
+      const result = await favoriteCollection.insertOne(newFavorite);
+      res.status(201).send(result);
+    });
+
+    app.delete("/api/favorites/:id", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid favorite id." });
+      }
+      const query = {
+        _id: new ObjectId(req.params.id),
+        userId: req.query.userId,
+      };
+      const result = await favoriteCollection.deleteOne(query);
+
+      if (result.deletedCount === 0) {
+        return res
+          .status(404)
+          .send({ error: true, message: "Favorite not found." });
+      }
+      res.send(result);
+    });
 
     console.log("You successfully connected to MongoDB!");
     return client;
