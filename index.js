@@ -23,6 +23,63 @@ async function connectToMongoDB() {
     const propertyCollection = db.collection("properties");
 
     // property related apis
+    app.get("/api/properties", async (req, res) => {
+      const {
+        search,
+        location,
+        type,
+        status,
+        ownerId,
+        minPrice,
+        maxPrice,
+        bedrooms,
+        sort,
+      } = req.query;
+
+      const page = Math.max(parseInt(req.query.page) || 1, 1);
+      const limit = Math.min(Math.max(parseInt(req.query.limit) || 9, 1), 50);
+      const skip = (page - 1) * limit;
+
+      const query = {};
+      if (ownerId) query.ownerId = ownerId;
+      if (status) query.status = status;
+      if (type) query.type = type;
+      if (location) query.location = { $regex: location, $options: "i" };
+      if (bedrooms) query.bedrooms = { $gte: Number(bedrooms) };
+      if (search) {
+        query.$or = [
+          { title: { $regex: search, $options: "i" } },
+          { location: { $regex: search, $options: "i" } },
+        ];
+      }
+      if (minPrice || maxPrice) {
+        query.price = {};
+        if (minPrice) query.price.$gte = Number(minPrice);
+        if (maxPrice) query.price.$lte = Number(maxPrice);
+      }
+
+      const sortMap = {
+        newest: { createdAt: -1 },
+        price_asc: { price: 1 },
+        price_desc: { price: -1 },
+      };
+
+      const items = await propertyCollection
+        .find(query)
+        .sort(sortMap[sort] || sortMap.newest)
+        .skip(skip)
+        .limit(limit)
+        .toArray();
+      const total = await propertyCollection.countDocuments(query);
+
+      res.send({
+        items,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      });
+    });
 
     // অবশ্যই "/:id"-এর আগে থাকতে হবে
     app.get("/api/properties/featured", async (req, res) => {
