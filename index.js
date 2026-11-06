@@ -21,6 +21,7 @@ async function connectToMongoDB() {
 
     const db = client.db("rentoraDB");
     const propertyCollection = db.collection("properties");
+    const bookingCollection = db.collection("bookings");
 
     // property related apis
     app.get("/api/properties", async (req, res) => {
@@ -168,6 +169,115 @@ async function connectToMongoDB() {
         });
       }
       res.send(result);
+    });
+
+    // booking related apis
+
+    app.get("/api/bookings", async (req, res) => {
+      const query = {};
+      if (req.query.tenantId) query.tenantId = req.query.tenantId;
+      if (req.query.ownerId) query.ownerId = req.query.ownerId;
+      if (req.query.propertyId) query.propertyId = req.query.propertyId;
+      if (req.query.status) query.status = req.query.status;
+
+      const result = await bookingCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.send(result);
+    });
+
+    app.get("/api/bookings/:id", async (req, res) => {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res
+          .status(400)
+          .send({ error: true, message: "Invalid booking id." });
+      }
+      const result = await bookingCollection.findOne({
+        _id: new ObjectId(req.params.id),
+      });
+      if (!result) {
+        return res
+          .status(404)
+          .send({ error: true, message: "Booking not found." });
+      }
+      res.send(result);
+    });
+
+    app.post("/api/bookings", async (req, res) => {
+      const {
+        propertyId,
+        tenantId,
+        tenantName,
+        tenantEmail,
+        moveInDate,
+        phone,
+        notes,
+      } = req.body;
+
+      if (!ObjectId.isValid(propertyId) || !tenantId || !moveInDate || !phone) {
+        return res.status(400).send({
+          error: true,
+          message: "propertyId, tenantId, moveInDate and phone are required.",
+        });
+      }
+
+      const property = await propertyCollection.findOne({
+        _id: new ObjectId(propertyId),
+      });
+      if (!property) {
+        return res
+          .status(404)
+          .send({ error: true, message: "Property not found." });
+      }
+      if (property.status !== "available") {
+        return res
+          .status(400)
+          .send({ error: true, message: "This property is not available." });
+      }
+      if (property.ownerId === tenantId) {
+        return res
+          .status(400)
+          .send({ error: true, message: "You cannot book your own property." });
+      }
+
+      // একই ইউজারের একই প্রপার্টিতে সক্রিয় বুকিং থাকলে আবার নয়
+      const existing = await bookingCollection.findOne({
+        propertyId,
+        tenantId,
+        status: { $in: ["pending", "approved"] },
+      });
+      if (existing) {
+        // পেমেন্ট বাকি থাকলে সেই বুকিংয়েই ফেরত পাঠাই
+        if (existing.paymentStatus === "unpaid") {
+          return res.send({ insertedId: existing._id, existing: true });
+        }
+        return res
+          .status(409)
+          .send({ error: true, message: "You already booked this property." });
+      }
+
+      const newBooking = {
+        propertyId,
+        propertyTitle: property.title,
+        propertyImage: property.images?.[0] || "",
+        ownerId: property.ownerId,
+        ownerName: property.ownerName,
+        ownerEmail: property.ownerEmail,
+        tenantId,
+        tenantName,
+        tenantEmail,
+        moveInDate,
+        phone,
+        notes: notes || "",
+        amount: Number(property.price), // সার্ভার নিজে দাম বসায়, ক্লায়েন্টের ওপর ভরসা নেই
+        status: "pending",
+        paymentStatus: "unpaid",
+        createdAt: new Date(),
+      };
+
+      const result = await bookingCollection.insertOne(newBooking);
+      res.status(201).send(result);
     });
 
     console.log("You successfully connected to MongoDB!");
