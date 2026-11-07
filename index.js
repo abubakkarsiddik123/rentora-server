@@ -1454,7 +1454,7 @@ app.use((error, req, res, next) => {
 
 async function startServer() {
   try {
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("rentoraDB");
 
