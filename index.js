@@ -419,32 +419,6 @@ app.get(
   }),
 );
 
-app.get(
-  "/api/property-types",
-  asyncHandler(async (req, res) => {
-    const result = await propertyCollection
-      .aggregate([
-        {
-          $match: {
-            status: "approved",
-            type: { $exists: true, $ne: "" },
-          },
-        },
-        {
-          $group: {
-            _id: "$type",
-            propertyCount: { $sum: 1 },
-          },
-        },
-        { $sort: { propertyCount: -1 } },
-      ])
-      .toArray();
-
-    res.send(result);
-  }),
-);
-
-
 // Approve / Reject property - Admin only
 app.patch(
   "/api/properties/:id/status",
