@@ -29,7 +29,10 @@ app.get("/", (req, res) => {
   res.send("Rentora server running");
 });
 
-// JWT Middleware
+// ==========================================
+// JWT MIDDLEWARE
+// ==========================================
+
 let jwtVerify;
 let JWKS;
 
@@ -74,7 +77,10 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// Role Middleware
+// ==========================================
+// ROLE MIDDLEWARE
+// ==========================================
+
 const verifyRole = (...roles) => {
   return (req, res, next) => {
     if (!roles.includes(req.user?.role)) {
@@ -88,6 +94,10 @@ const verifyRole = (...roles) => {
   };
 };
 
+// ==========================================
+// ASYNC HANDLER
+// ==========================================
+
 const asyncHandler = (handler) => {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(next);
@@ -96,17 +106,35 @@ const asyncHandler = (handler) => {
 
 const isValidId = (id) => ObjectId.isValid(id);
 
+// ==========================================
+// STRIPE
+// ==========================================
+
+let stripeClient;
+
+const getStripe = () => {
+  if (!stripeClient) {
+    const Stripe = require("stripe");
+    stripeClient = new Stripe(process.env.STRIPE_SECRET_KEY);
+  }
+
+  return stripeClient;
+};
+
+// ==========================================
+// DATABASE COLLECTIONS
+// ==========================================
+
 let propertyCollection;
 let bookingCollection;
 let transactionCollection;
 let favoriteCollection;
 let userCollection;
+let ownerRequestCollection;
 
 // ==========================================
 // PROPERTY APIs
 // ==========================================
-
-
 
 // Get all approved properties
 app.get(
@@ -117,7 +145,6 @@ app.get(
 
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 9, 1), 50);
-
     const skip = (page - 1) * limit;
 
     const query = { status: "approved" };
@@ -174,7 +201,7 @@ app.get(
   }),
 );
 
-// Get owner's properties
+// Get owner's properties (Admin gets all)
 app.get(
   "/api/my/properties",
   verifyToken,
@@ -201,15 +228,44 @@ app.get(
   }),
 );
 
+// Get one of my properties
+app.get(
+  "/api/my/properties/:id",
+  verifyToken,
+  verifyRole("owner", "admin"),
+  asyncHandler(async (req, res) => {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({
+        error: true,
+        message: "Invalid property id.",
+      });
+    }
+
+    const query = { _id: new ObjectId(req.params.id) };
+
+    if (req.user.role === "owner") {
+      query.ownerId = req.user.id;
+    }
+
+    const result = await propertyCollection.findOne(query);
+
+    if (!result) {
+      return res.status(404).send({
+        error: true,
+        message: "Property not found.",
+      });
+    }
+
+    res.send(result);
+  }),
+);
+
 // Get featured properties
 app.get(
   "/api/properties/featured",
   asyncHandler(async (req, res) => {
     const result = await propertyCollection
-      .find({
-        status: "approved",
-        featured: true,
-      })
+      .find({ status: "approved" })
       .sort({ createdAt: -1 })
       .limit(6)
       .toArray();
@@ -415,6 +471,7 @@ app.delete(
     res.send(result);
   }),
 );
+
 // ==========================================
 // BOOKING APIs
 // ==========================================
@@ -436,22 +493,12 @@ app.get(
     }
 
     if (req.user.role === "admin") {
-      if (req.query.tenantId) {
-        query.tenantId = req.query.tenantId;
-      }
-
-      if (req.query.ownerId) {
-        query.ownerId = req.query.ownerId;
-      }
+      if (req.query.tenantId) query.tenantId = req.query.tenantId;
+      if (req.query.ownerId) query.ownerId = req.query.ownerId;
     }
 
-    if (req.query.propertyId) {
-      query.propertyId = req.query.propertyId;
-    }
-
-    if (req.query.status) {
-      query.status = req.query.status;
-    }
+    if (req.query.propertyId) query.propertyId = req.query.propertyId;
+    if (req.query.status) query.status = req.query.status;
 
     const result = await bookingCollection
       .find(query)
@@ -536,9 +583,7 @@ app.post(
     const existing = await bookingCollection.findOne({
       propertyId,
       tenantId: req.user.id,
-      status: {
-        $in: ["pending", "approved"],
-      },
+      status: { $in: ["pending", "approved"] },
     });
 
     if (existing) {
@@ -559,21 +604,16 @@ app.post(
       propertyId,
       propertyTitle: property.title,
       propertyImage: property.images?.[0] || "",
-
       ownerId: property.ownerId,
       ownerName: property.ownerName,
       ownerEmail: property.ownerEmail,
-
       tenantId: req.user.id,
       tenantName: req.user.name,
       tenantEmail: req.user.email,
-
       moveInDate,
       phone,
       notes: notes || "",
-
       amount: Math.round(Number(property.price) * 0.1),
-
       status: "pending",
       paymentStatus: "unpaid",
       createdAt: new Date(),
@@ -601,12 +641,22 @@ app.patch(
       });
     }
 
-    const { status } = req.body;
+    const { status, rejectionReason } = req.body;
 
     if (!["approved", "rejected"].includes(status)) {
       return res.status(400).send({
         error: true,
         message: "Status must be approved or rejected.",
+      });
+    }
+
+    if (
+      status === "rejected" &&
+      (typeof rejectionReason !== "string" || !rejectionReason.trim())
+    ) {
+      return res.status(400).send({
+        error: true,
+        message: "Rejection reason is required.",
       });
     }
 
@@ -667,6 +717,7 @@ app.patch(
         {
           $set: {
             status: "rejected",
+            rejectionReason: "Property has been booked by another tenant.",
             respondedAt: new Date(),
           },
         },
@@ -682,6 +733,8 @@ app.patch(
       {
         $set: {
           status,
+          rejectionReason:
+            status === "rejected" ? rejectionReason.trim() : "",
           respondedAt: new Date(),
         },
       },
@@ -691,17 +744,98 @@ app.patch(
   }),
 );
 
+// ==========================================
+// PAYMENT APIs
+// ==========================================
+
+// Confirm payment - Tenant only
 app.post(
   "/api/payments/confirm",
   verifyToken,
   verifyRole("tenant"),
-  (req, res) => {
-    res.status(501).send({
-      error: true,
-      message:
-        "Payment verification is not configured. Verify the payment with your payment provider on the server before confirming.",
+  asyncHandler(async (req, res) => {
+    const { sessionId } = req.body;
+
+    if (!sessionId || typeof sessionId !== "string") {
+      return res.status(400).send({
+        error: true,
+        message: "sessionId is required.",
+      });
+    }
+
+    let session;
+
+    try {
+      session = await getStripe().checkout.sessions.retrieve(sessionId);
+    } catch (err) {
+      console.error("STRIPE RETRIEVE ERROR:", err.message);
+
+      return res.status(400).send({
+        error: true,
+        message: "Invalid payment session.",
+      });
+    }
+
+    if (session.payment_status !== "paid") {
+      return res.status(400).send({
+        error: true,
+        message: "Payment is not completed.",
+      });
+    }
+
+    const bookingId = session.metadata?.bookingId;
+
+    if (!isValidId(bookingId)) {
+      return res.status(400).send({
+        error: true,
+        message: "Payment session has no valid booking.",
+      });
+    }
+
+    const booking = await bookingCollection.findOne({
+      _id: new ObjectId(bookingId),
+      tenantId: req.user.id,
     });
-  },
+
+    if (!booking) {
+      return res.status(404).send({
+        error: true,
+        message: "Booking not found.",
+      });
+    }
+
+    await bookingCollection.updateOne(
+      { _id: booking._id },
+      {
+        $set: {
+          paymentStatus: "paid",
+          paidAt: new Date(),
+        },
+      },
+    );
+
+    await transactionCollection.updateOne(
+      { sessionId },
+      {
+        $setOnInsert: {
+          transactionId: sessionId,
+          sessionId,
+          bookingId,
+          propertyId: booking.propertyId,
+          propertyTitle: booking.propertyTitle,
+          tenantId: booking.tenantId,
+          tenantName: booking.tenantName,
+          ownerId: booking.ownerId,
+          ownerName: booking.ownerName,
+          amount: booking.amount,
+          createdAt: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+
+    res.send({ confirmed: true });
+  }),
 );
 
 // Get transactions
@@ -721,13 +855,8 @@ app.get(
     }
 
     if (req.user.role === "admin") {
-      if (req.query.tenantId) {
-        query.tenantId = req.query.tenantId;
-      }
-
-      if (req.query.ownerId) {
-        query.ownerId = req.query.ownerId;
-      }
+      if (req.query.tenantId) query.tenantId = req.query.tenantId;
+      if (req.query.ownerId) query.ownerId = req.query.ownerId;
     }
 
     const result = await transactionCollection
@@ -738,6 +867,7 @@ app.get(
     res.send(result);
   }),
 );
+
 // ==========================================
 // FAVORITE APIs
 // ==========================================
@@ -780,9 +910,7 @@ app.post(
 
     const property = await propertyCollection.findOne({
       _id: new ObjectId(propertyId),
-      status: {
-        $in: ["approved", "booked"],
-      },
+      status: { $in: ["approved", "booked"] },
     });
 
     if (!property) {
@@ -865,27 +993,14 @@ app.get(
   verifyRole("admin"),
   asyncHandler(async (req, res) => {
     const { role, search } = req.query;
-
     const query = {};
 
-    if (role) {
-      query.role = role;
-    }
+    if (role) query.role = role;
 
     if (search) {
       query.$or = [
-        {
-          name: {
-            $regex: search,
-            $options: "i",
-          },
-        },
-        {
-          email: {
-            $regex: search,
-            $options: "i",
-          },
-        },
+        { name: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
       ];
     }
 
@@ -936,9 +1051,7 @@ app.patch(
     }
 
     const result = await userCollection.updateOne(
-      {
-        _id: new ObjectId(req.params.id),
-      },
+      { _id: new ObjectId(req.params.id) },
       {
         $set: {
           role,
@@ -955,6 +1068,195 @@ app.patch(
     }
 
     res.send(result);
+  }),
+);
+
+// ==========================================
+// OWNER REQUEST APIs
+// ==========================================
+
+// Tenant: Apply for owner
+app.post(
+  "/api/owner-requests",
+  verifyToken,
+  verifyRole("tenant"),
+  asyncHandler(async (req, res) => {
+    const { phone, address, reason } = req.body;
+
+    if (
+      typeof phone !== "string" ||
+      !phone.trim() ||
+      typeof address !== "string" ||
+      !address.trim()
+    ) {
+      return res.status(400).send({
+        error: true,
+        message: "Phone and address are required.",
+      });
+    }
+
+    const pending = await ownerRequestCollection.findOne({
+      userId: req.user.id,
+      status: "pending",
+    });
+
+    if (pending) {
+      return res.status(409).send({
+        error: true,
+        message: "You already have a pending request.",
+      });
+    }
+
+    const result = await ownerRequestCollection.insertOne({
+      userId: req.user.id,
+      name: req.user.name,
+      email: req.user.email,
+      phone: phone.trim(),
+      address: address.trim(),
+      reason: typeof reason === "string" ? reason.trim() : "",
+      status: "pending",
+      rejectionReason: "",
+      createdAt: new Date(),
+    });
+
+    res.status(201).send({
+      acknowledged: result.acknowledged,
+      insertedId: result.insertedId,
+    });
+  }),
+);
+
+// Tenant: Get own latest request
+app.get(
+  "/api/owner-requests/mine",
+  verifyToken,
+  asyncHandler(async (req, res) => {
+    const result = await ownerRequestCollection
+      .find({ userId: req.user.id })
+      .sort({ createdAt: -1 })
+      .limit(1)
+      .toArray();
+
+    res.send(result[0] || null);
+  }),
+);
+
+// Admin: Get all owner requests
+app.get(
+  "/api/owner-requests",
+  verifyToken,
+  verifyRole("admin"),
+  asyncHandler(async (req, res) => {
+    const result = await ownerRequestCollection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(result);
+  }),
+);
+
+// Admin: Approve / Reject owner request
+app.patch(
+  "/api/owner-requests/:id",
+  verifyToken,
+  verifyRole("admin"),
+  asyncHandler(async (req, res) => {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({
+        error: true,
+        message: "Invalid request id.",
+      });
+    }
+
+    const { status, rejectionReason } = req.body;
+
+    if (!["approved", "rejected"].includes(status)) {
+      return res.status(400).send({
+        error: true,
+        message: "Status must be approved or rejected.",
+      });
+    }
+
+    if (
+      status === "rejected" &&
+      (typeof rejectionReason !== "string" || !rejectionReason.trim())
+    ) {
+      return res.status(400).send({
+        error: true,
+        message: "Rejection reason is required.",
+      });
+    }
+
+    const requestId = new ObjectId(req.params.id);
+
+    const ownerRequest = await ownerRequestCollection.findOne({
+      _id: requestId,
+      status: "pending",
+    });
+
+    if (!ownerRequest) {
+      return res.status(404).send({
+        error: true,
+        message: "Request not found or already processed.",
+      });
+    }
+
+    if (status === "approved") {
+      if (!isValidId(ownerRequest.userId)) {
+        return res.status(400).send({
+          error: true,
+          message: "Invalid user id.",
+        });
+      }
+
+      const userResult = await userCollection.updateOne(
+        { _id: new ObjectId(ownerRequest.userId) },
+        {
+          $set: {
+            role: "owner",
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+      if (userResult.matchedCount === 0) {
+        return res.status(404).send({
+          error: true,
+          message: "Applicant user not found.",
+        });
+      }
+    }
+
+    const result = await ownerRequestCollection.updateOne(
+      {
+        _id: requestId,
+        status: "pending",
+      },
+      {
+        $set: {
+          status,
+          rejectionReason:
+            status === "rejected" ? rejectionReason.trim() : "",
+          updatedAt: new Date(),
+        },
+      },
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(409).send({
+        error: true,
+        message: "Request has already been processed.",
+      });
+    }
+
+    res.send({
+      success: true,
+      message:
+        status === "approved"
+          ? "User is now an owner."
+          : "Owner request rejected.",
+    });
   }),
 );
 
@@ -985,17 +1287,25 @@ async function startServer() {
     bookingCollection = db.collection("bookings");
     transactionCollection = db.collection("transactions");
     favoriteCollection = db.collection("favorites");
+    ownerRequestCollection = db.collection("ownerRequests");
 
     userCollection = client
       .db(process.env.AUTH_DB_NAME || "rentoraDB")
       .collection("user");
 
-    // jose is ESM, so load dynamically in CommonJS backend
-    const jose = require("jose-cjs");
+    let jose;
+
+    try {
+      jose = require("jose-cjs");
+    } catch {
+      jose = await import("jose");
+    }
 
     jwtVerify = jose.jwtVerify;
 
-    JWKS = jose.createRemoteJWKSet(new URL(`${CLIENT_URL}/api/auth/jwks`));
+    JWKS = jose.createRemoteJWKSet(
+      new URL(`${CLIENT_URL}/api/auth/jwks`),
+    );
 
     app.listen(port, () => {
       console.log(`Rentora server running on port ${port}`);
