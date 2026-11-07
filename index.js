@@ -131,6 +131,7 @@ let transactionCollection;
 let favoriteCollection;
 let userCollection;
 let ownerRequestCollection;
+let reviewCollection;
 
 // ==========================================
 // PROPERTY APIs
@@ -391,6 +392,58 @@ app.patch(
     res.send(result);
   }),
 );
+
+app.get(
+  "/api/top-locations",
+  asyncHandler(async (req, res) => {
+    const result = await propertyCollection
+      .aggregate([
+        {
+          $match: {
+            status: "approved",
+            location: { $exists: true, $ne: "" },
+          },
+        },
+        {
+          $group: {
+            _id: "$location",
+            propertyCount: { $sum: 1 },
+          },
+        },
+        { $sort: { propertyCount: -1 } },
+        { $limit: 6 },
+      ])
+      .toArray();
+
+    res.send(result);
+  }),
+);
+
+app.get(
+  "/api/property-types",
+  asyncHandler(async (req, res) => {
+    const result = await propertyCollection
+      .aggregate([
+        {
+          $match: {
+            status: "approved",
+            type: { $exists: true, $ne: "" },
+          },
+        },
+        {
+          $group: {
+            _id: "$type",
+            propertyCount: { $sum: 1 },
+          },
+        },
+        { $sort: { propertyCount: -1 } },
+      ])
+      .toArray();
+
+    res.send(result);
+  }),
+);
+
 
 // Approve / Reject property - Admin only
 app.patch(
@@ -733,8 +786,7 @@ app.patch(
       {
         $set: {
           status,
-          rejectionReason:
-            status === "rejected" ? rejectionReason.trim() : "",
+          rejectionReason: status === "rejected" ? rejectionReason.trim() : "",
           respondedAt: new Date(),
         },
       },
@@ -979,6 +1031,156 @@ app.delete(
     }
 
     res.send(result);
+  }),
+);
+
+// ==========================================
+// CUSTOMER REVIEW APIs
+// ==========================================
+
+// Get latest 4 positive reviews - Public
+app.get(
+  "/api/reviews",
+  asyncHandler(async (req, res) => {
+    const result = await reviewCollection
+      .find({ rating: { $gte: 4 } })
+      .sort({ createdAt: -1 })
+      .limit(4)
+      .toArray();
+
+    res.send({ items: result });
+  }),
+);
+
+// Get reviews for a specific property - Public
+app.get(
+  "/api/reviews/:propertyId",
+  asyncHandler(async (req, res) => {
+    const { propertyId } = req.params;
+
+    if (!isValidId(propertyId)) {
+      return res.status(400).send({
+        error: true,
+        message: "Invalid property id.",
+      });
+    }
+
+    const result = await reviewCollection
+      .find({ propertyId })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send(result);
+  }),
+);
+
+// Add review - Tenant only
+app.post(
+  "/api/reviews",
+  verifyToken,
+  verifyRole("tenant"),
+  asyncHandler(async (req, res) => {
+    const { propertyId, rating, comment } = req.body;
+
+    if (!isValidId(propertyId)) {
+      return res.status(400).send({
+        error: true,
+        message: "Valid propertyId is required.",
+      });
+    }
+
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).send({
+        error: true,
+        message: "Rating must be between 1 and 5.",
+      });
+    }
+
+    if (
+      typeof comment !== "string" ||
+      !comment.trim() ||
+      comment.trim().length > 1000
+    ) {
+      return res.status(400).send({
+        error: true,
+        message: "Comment is required and must be under 1000 characters.",
+      });
+    }
+
+    // Check property
+    const property = await propertyCollection.findOne({
+      _id: new ObjectId(propertyId),
+      status: { $in: ["approved", "booked"] },
+    });
+
+    if (!property) {
+      return res.status(404).send({
+        error: true,
+        message: "Property not found.",
+      });
+    }
+
+    console.log("Review Property ID:", propertyId);
+    console.log("JWT User ID:", req.user.id);
+    console.log("Booking Tenant ID:", "6aee5bd67121e3ba153f825f");
+
+    // Check successful booking
+    const booking = await bookingCollection.findOne({
+      propertyId,
+      tenantId: req.user.id,
+      paymentStatus: "paid",
+      status: "approved",
+    });
+
+    if (!booking) {
+      return res.status(403).send({
+        error: true,
+        message: "You can review only properties you have successfully booked.",
+      });
+    }
+
+    // Check existing review
+    const existingReview = await reviewCollection.findOne({
+      propertyId,
+      userId: req.user.id,
+    });
+
+    if (existingReview) {
+      return res.status(409).send({
+        error: true,
+        message: "You have already reviewed this property.",
+      });
+    }
+
+    const newReview = {
+      propertyId,
+      propertyTitle: property.title,
+      userId: req.user.id,
+      name: req.user.name,
+      email: req.user.email,
+      rating,
+      comment: comment.trim(),
+      createdAt: new Date(),
+    };
+
+    try {
+      const result = await reviewCollection.insertOne(newReview);
+
+      res.status(201).send({
+        success: true,
+        message: "Review submitted successfully.",
+        insertedId: result.insertedId,
+      });
+    } catch (error) {
+      if (error.code === 11000) {
+        return res.status(409).send({
+          error: true,
+          message: "You have already reviewed this property.",
+        });
+      }
+
+      throw error;
+    }
   }),
 );
 
@@ -1236,8 +1438,7 @@ app.patch(
       {
         $set: {
           status,
-          rejectionReason:
-            status === "rejected" ? rejectionReason.trim() : "",
+          rejectionReason: status === "rejected" ? rejectionReason.trim() : "",
           updatedAt: new Date(),
         },
       },
@@ -1288,10 +1489,16 @@ async function startServer() {
     transactionCollection = db.collection("transactions");
     favoriteCollection = db.collection("favorites");
     ownerRequestCollection = db.collection("ownerRequests");
+    reviewCollection = db.collection("reviews");
 
     userCollection = client
       .db(process.env.AUTH_DB_NAME || "rentoraDB")
       .collection("user");
+
+    await reviewCollection.createIndex(
+      { propertyId: 1, userId: 1 },
+      { unique: true },
+    );
 
     let jose;
 
@@ -1303,9 +1510,7 @@ async function startServer() {
 
     jwtVerify = jose.jwtVerify;
 
-    JWKS = jose.createRemoteJWKSet(
-      new URL(`${CLIENT_URL}/api/auth/jwks`),
-    );
+    JWKS = jose.createRemoteJWKSet(new URL(`${CLIENT_URL}/api/auth/jwks`));
 
     app.listen(port, () => {
       console.log(`Rentora server running on port ${port}`);
